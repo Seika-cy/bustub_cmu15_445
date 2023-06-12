@@ -11,20 +11,45 @@ auto TrieStore::Get(std::string_view key) -> std::optional<ValueGuard<T>> {
   // (2) Lookup the value in the trie.
   // (3) If the value is found, return a ValueGuard object that holds a reference to the value and the
   //     root. Otherwise, return std::nullopt.
-  throw NotImplementedException("TrieStore::Get is not implemented.");
+  // throw NotImplementedException("TrieStore::Get is not implemented.");
+
+  std::shared_lock<std::shared_mutex> root_lock(root_lock_);
+  auto root = this->root_;
+  root_lock.unlock();
+
+  auto ptr_value = root.Get<T>(key);
+  if (ptr_value == nullptr) {
+    return std::nullopt;
+  }
+  const T &value = *ptr_value;
+  return ValueGuard<T>{root, std::move(value)};
 }
 
 template <class T>
 void TrieStore::Put(std::string_view key, T value) {
   // You will need to ensure there is only one writer at a time. Think of how you can achieve this.
   // The logic should be somehow similar to `TrieStore::Get`.
-  throw NotImplementedException("TrieStore::Put is not implemented.");
+  // throw NotImplementedException("TrieStore::Put is not implemented.");
+
+  auto root_lock = std::unique_lock<std::shared_mutex>(root_lock_);
+  auto write_lock = std::unique_lock<std::mutex>(write_lock_);
+  auto root = this->root_;
+  this->root_ = root.Put(key, std::move(value));
+  write_lock.unlock();
+  root_lock.unlock();
 }
 
 void TrieStore::Remove(std::string_view key) {
   // You will need to ensure there is only one writer at a time. Think of how you can achieve this.
   // The logic should be somehow similar to `TrieStore::Get`.
-  throw NotImplementedException("TrieStore::Remove is not implemented.");
+  // throw NotImplementedException("TrieStore::Remove is not implemented.");
+
+  auto root_lock = std::unique_lock<std::shared_mutex>(root_lock_);
+  auto write_lock = std::unique_lock<std::mutex>(write_lock_);
+  auto root = this->root_;
+  this->root_ = root.Remove(key);
+  write_lock.unlock();
+  root_lock.unlock();
 }
 
 // Below are explicit instantiation of template functions.
@@ -43,6 +68,16 @@ template auto TrieStore::Get(std::string_view key) -> std::optional<ValueGuard<I
 template void TrieStore::Put(std::string_view key, Integer value);
 
 template auto TrieStore::Get(std::string_view key) -> std::optional<ValueGuard<MoveBlocked>>;
-template void TrieStore::Put(std::string_view key, MoveBlocked value);
+// template void TrieStore::Put(std::string_view key, MoveBlocked value);
+
+template <>
+void TrieStore::Put(std::string_view key, MoveBlocked value) {
+  auto root_lock = std::unique_lock<std::shared_mutex>(root_lock_);
+  auto write_lock = std::unique_lock<std::mutex>(write_lock_);
+  auto root = this->root_;
+  this->root_ = root.Put(key, MoveBlocked{std::move(value.wait_)});
+  write_lock.unlock();
+  root_lock.unlock();
+}
 
 }  // namespace bustub
