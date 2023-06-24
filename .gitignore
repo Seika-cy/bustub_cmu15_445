@@ -248,5 +248,5 @@ docs/dev
 # DIY
 #==============================================================================#
 
-*.db
-!assignments_2023_spring/*
+imdb-cmudb2022.db
+! assignments_2023_spring/*

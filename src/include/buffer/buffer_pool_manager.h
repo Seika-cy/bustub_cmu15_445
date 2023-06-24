@@ -207,6 +207,16 @@ class BufferPoolManager {
     // This is a no-nop right now without a more complex data structure to track deallocated pages
   }
 
+  auto GetPage(page_id_t page_id) -> Page *;
+
+  auto GetPageId(frame_id_t fid) -> page_id_t;
+
+  auto GetFreePage() -> Page *;
+
+  auto WriteBackPage(page_id_t page_id) -> Page *;
+
+  auto AllocFrame(page_id_t page_id) -> Page *;
+
   // TODO(student): You may add additional private members and helper functions
 };
 }  // namespace bustub
