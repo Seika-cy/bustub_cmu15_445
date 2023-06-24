@@ -17,6 +17,7 @@
 #include "storage/page/page_guard.h"
 
 namespace bustub {
+  // TODO(cyrus): Creat ThreadPool to  make disk IO concurrent.
 
 BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager, size_t replacer_k,
                                      LogManager *log_manager)
@@ -50,9 +51,7 @@ auto BufferPoolManager::GetPage(page_id_t page_id) -> Page * {
 auto BufferPoolManager::GetPageId(frame_id_t fid) -> page_id_t {
   for (const auto &[key, value] : page_table_) {
     if (value == fid) {
-      auto ret = key;
-      page_table_.erase(key);
-      return ret;
+      return key;
     }
   }
   return INVALID_PAGE_ID;
@@ -71,9 +70,12 @@ auto BufferPoolManager::WriteBackPage(page_id_t page_id) -> Page * {
   for (size_t i = 0; i < pool_size_; i++) {
     if (pages_[i].GetPageId() == page_id) {
       if (pages_[i].IsDirty()) {
-        pages_[i].RLatch();
-        disk_manager_->WritePage(page_id, pages_[i].GetData());
-        pages_[i].RUnlatch();
+        std::thread t{[&] {
+          pages_[i].RLatch();
+          disk_manager_->WritePage(page_id, pages_[i].GetData());
+          pages_[i].RUnlatch();
+        }};
+        t.join();
       }
       return &pages_[i];
     }
@@ -109,12 +111,7 @@ auto BufferPoolManager::AllocFrame(page_id_t page_id) -> Page * {
   ret->page_id_ = page_id;
   ret->is_dirty_ = false;
   ret->pin_count_ = 1;
-  ret->WLatch();
-  ret->ResetMemory();
-  ret->WUnlatch();
-  
-  
-  replacer_->RecordAccess(frame_id);
+
   replacer_->SetEvictable(frame_id, false);
   page_table_.emplace(page_id, frame_id);
 
@@ -125,10 +122,20 @@ auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
   std::lock_guard<std::mutex> lock(latch_);
   // std::unique_lock<std::mutex> lcok(latch_);
   *page_id = AllocatePage();
-  return AllocFrame(*page_id);
+  auto page = AllocFrame(*page_id);
+  if (page == nullptr) {
+    return nullptr;
+  }
+
+  page->WLatch();
+  page->ResetMemory();
+  page->WUnlatch();
+
+  replacer_->RecordAccess(page_table_.at(*page_id));
+  return page;
 }
 
-auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
+auto BufferPoolManager::FetchPage(page_id_t page_id, AccessType access_type) -> Page * {
   std::lock_guard<std::mutex> lock(latch_);
 
   frame_id_t frame_id = -1;
@@ -137,6 +144,8 @@ auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType
   if (page_table_.count(page_id) != 0) {
     frame_id = page_table_.at(page_id);
     page = GetPage(page_id);
+    ++(page->pin_count_);
+    replacer_->SetEvictable(frame_id, false);
   } else {
     page = AllocFrame(page_id);
 
@@ -148,15 +157,15 @@ auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType
     BUSTUB_ASSERT(frame_id != -1, "don't find frame");
 
     page->WLatch();
-    disk_manager_->ReadPage(page_id, page->data_);
+    disk_manager_->ReadPage(page_id, page->GetData());
     page->WUnlatch();
   }
-  replacer_->RecordAccess(frame_id);
+  replacer_->RecordAccess(frame_id, access_type);
 
   return page;
 }
 
-auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
+auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, AccessType access_type) -> bool {
   std::lock_guard<std::mutex> lock(latch_);
   if (page_table_.count(page_id) == 0) {
     return false;
@@ -170,6 +179,13 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
   }
 
   --(page->pin_count_);
+  // replacer_->RecordAccess(page_table_.at(page_id), access_type);
+  // if (access_type == AccessType::Get) {
+  //   replacer_->RecordAccess(frame_id, AccessType::Get);
+  // } else if (access_type == AccessType::Scan) {
+  //   ;
+  // }
+
   if (page->GetPinCount() == 0) {
     flag = true;
   }
@@ -191,6 +207,7 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
   page->RLatch();
   disk_manager_->WritePage(page_id, page->GetData());
   page->RUnlatch();
+  replacer_->RecordAccess(page_table_.at(page_id));
 
   return true;
 }
@@ -205,6 +222,7 @@ void BufferPoolManager::FlushAllPages() {
       page.RLatch();
       disk_manager_->WritePage(page.GetPageId(), page.GetData());
       page.RUnlatch();
+      replacer_->RecordAccess(page_table_.at(page.GetPageId()));
     }
   }
 }
@@ -224,8 +242,9 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
 
   if (page->IsDirty()) {
     page->RLatch();
-    disk_manager_->WritePage(page_id, page->data_);
+    disk_manager_->WritePage(page_id, page->GetData());
     page->RUnlatch();
+
     page->is_dirty_ = false;
   }
   page->WLatch();
@@ -248,27 +267,12 @@ auto BufferPoolManager::AllocatePage() -> page_id_t { return next_page_id_++; }
 auto BufferPoolManager::FetchPageBasic(page_id_t page_id) -> BasicPageGuard { return {this, FetchPage(page_id)}; }
 
 auto BufferPoolManager::FetchPageRead(page_id_t page_id) -> ReadPageGuard {
-  auto page = FetchPage(page_id);
-  if (page == nullptr) {
-    return {this, nullptr};
-  }
-
-  ++(page->pin_count_);
-
-  page->RLatch();
-  return {this, page};
+  return {this, FetchPage(page_id, AccessType::Scan)};
 }
 
 auto BufferPoolManager::FetchPageWrite(page_id_t page_id) -> WritePageGuard {
-  auto page = FetchPage(page_id);
-  if (page == nullptr) {
-    return {this, nullptr};
-  }
-  ++(page->pin_count_);
-  page->WLatch();
-  return {this, page};
+  return {this, FetchPage(page_id, AccessType::Get)};
 }
 
 auto BufferPoolManager::NewPageGuarded(page_id_t *page_id) -> BasicPageGuard { return {this, NewPage(page_id)}; }
-
 }  // namespace bustub

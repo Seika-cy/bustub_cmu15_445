@@ -51,8 +51,8 @@ auto LRUKReplacer::Evict(frame_id_t *frame_id) -> bool {
 
   // less func of timestamp
   auto cmp = [this](TNode &lhs, TNode &rhs) -> bool {
-    auto l = (lhs.k_ == this->k_) ? lhs.timestamp_ : 0;
-    auto r = (rhs.k_ == this->k_) ? rhs.timestamp_ : 0;
+    auto l = (lhs.k_ >= this->k_) ? lhs.timestamp_ : 0;
+    auto r = (rhs.k_ >= this->k_) ? rhs.timestamp_ : 0;
     return (l != r) ? l < r : (lhs.timestamp_ < rhs.timestamp_);
   };
 
@@ -94,12 +94,14 @@ void LRUKReplacer::RecordAccess(frame_id_t frame_id, AccessType access_type) {
   } else {
     ++(node.k_);
   }
-
-  node.history_.emplace_front(current_timestamp_);
-
-  // if (access_type == AccessType::Get) {
-  // } else if (access_type == AccessType::Scan) {
-  // }
+  float n = 0.618;
+  if (access_type == AccessType::Get) {
+    node.history_.emplace_front(current_timestamp_ - n * 1000);
+  } else if (access_type == AccessType::Scan) {
+    node.history_.emplace_front(current_timestamp_ + n * 1000);
+  } else {
+    node.history_.emplace_front(current_timestamp_);
+  }
 }
 
 void LRUKReplacer::SetEvictable(frame_id_t frame_id, bool set_evictable) {
