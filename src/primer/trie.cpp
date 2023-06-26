@@ -81,7 +81,6 @@ auto Trie::Remove(std::string_view key) const -> Trie {
   std::shared_ptr new_root = this->root_->Clone();
   if (this->root_ == nullptr) {
     return Trie{new_root};
-    ;
   }
   if (key.empty()) {
     return Trie{std::make_shared<TrieNode>(new_root->children_)};
