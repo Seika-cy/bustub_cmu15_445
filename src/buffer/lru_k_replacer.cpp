@@ -14,115 +14,108 @@
 #include "common/exception.h"
 
 namespace bustub {
-
-LRUKReplacer::LRUKReplacer(size_t num_frames, size_t k) : replacer_size_(num_frames), k_(k) {
-  current_timestamp_ = std::chrono::system_clock::now().time_since_epoch().count();
-}
+LRUKReplacer::LRUKReplacer(size_t num_frames, size_t k) : replacer_size_(num_frames), k_(k) {}
 
 auto LRUKReplacer::Evict(frame_id_t *frame_id) -> bool {
   std::lock_guard<std::mutex> lock(latch_);
-  current_timestamp_ = std::chrono::system_clock::now().time_since_epoch().count();
 
   if (curr_size_ == 0) {
     return false;
   }
 
-  struct TNode {
-    frame_id_t fid_;
-    size_t timestamp_;
-    size_t k_;
-  };
+  LRUKNode *t = nullptr;
+  if (!lru_list_.empty()) {
+    t = lru_list_.back();
+    lru_list_.pop_back();
 
-  std::vector<TNode> vec{};
-  vec.reserve(curr_size_);
-
-  for (const auto &[key, value] : node_store_) {
-    if (value.is_evictable_) {
-      TNode t = {
-          .fid_ = value.fid_,
-          .timestamp_ = (value.history_.empty()) ? 0 : value.history_.front(),
-          .k_ = value.k_,
-      };
-      vec.emplace_back(t);
-    }
+  } else {
+    t = k_list_.back();
+    k_list_.pop_back();
   }
 
-  BUSTUB_ASSERT(!vec.empty(), "");
-
-  // less func of timestamp
-  auto cmp = [this](TNode &lhs, TNode &rhs) -> bool {
-    auto l = (lhs.k_ >= this->k_) ? lhs.timestamp_ : 0;
-    auto r = (rhs.k_ >= this->k_) ? rhs.timestamp_ : 0;
-    return (l != r) ? l < r : (lhs.timestamp_ < rhs.timestamp_);
-  };
-
-  // the minimum of timestamp is the maximux of k-distance.
-  auto out = std::min_element(vec.begin(), vec.end(), cmp);
-
-  *frame_id = out->fid_;
-
-  auto &node = node_store_.at(*frame_id);
-  node.history_.clear();
-  node.k_ = 0;
-  node.is_evictable_ = false;
-  // node.is_evictable_ = false;
-  // node_store_.erase(*frame_id);
-
-  BUSTUB_ASSERT(curr_size_ > 0, "curr_size_ <=0");
+  *frame_id = t->fid_;
   --curr_size_;
+  t->is_evictable_ = false;
+  t->history_.clear();
+  t->k_ = 0;
 
   return true;
 }
 
 void LRUKReplacer::RecordAccess(frame_id_t frame_id, AccessType access_type) {
   std::lock_guard<std::mutex> lock(latch_);
-  // std::unique_lock<std::mutex> lcok(latch_);
   current_timestamp_ = std::chrono::system_clock::now().time_since_epoch().count();
   BUSTUB_ASSERT(frame_id >= 0 && static_cast<size_t>(frame_id) < replacer_size_, "frame id is invalid");
 
   if (node_store_.count(frame_id) == 0) {
-    node_store_[frame_id].fid_ = frame_id;
-    node_store_[frame_id].k_ = 0;
+    node_store_[frame_id] = LRUKNode(frame_id);
   }
+  LRUKNode *node = &node_store_.at(frame_id);
 
-  auto &node = node_store_.at(frame_id);
+  BUSTUB_ASSERT(node->k_ <= this->k_, "node->k_ > this->k_");
+  BUSTUB_ASSERT(node->k_ == node->history_.size(), "node.k_ != node.history_.size()");
 
-  BUSTUB_ASSERT(node.k_ == node.history_.size(), "");
-
-  if (node.k_ == this->k_) {
-    node.history_.pop_back();
+  if (node->k_ == this->k_) {
+    node->history_.pop_back();
+    node->history_.push_front(current_timestamp_);
+    if (node->is_evictable_) {
+      BUSTUB_ASSERT(dict_.count(frame_id), "This frame does not exist in dict");
+      k_list_.splice(k_list_.begin(), k_list_, dict_[frame_id]);
+    }
   } else {
-    ++(node.k_);
-  }
-  float n = 0.618;
-  if (access_type == AccessType::Get) {
-    node.history_.emplace_front(current_timestamp_ - n * 1000);
-  } else if (access_type == AccessType::Scan) {
-    node.history_.emplace_front(current_timestamp_ + n * 1000);
-  } else {
-    node.history_.emplace_front(current_timestamp_);
+    ++(node->k_);
+    node->history_.push_front(current_timestamp_);
+    if (node->is_evictable_) {
+      if (node->k_ == this->k_) {
+        BUSTUB_ASSERT(dict_.count(frame_id), "This frame does not exist in dict");
+        k_list_.splice(k_list_.begin(), lru_list_, dict_[frame_id]);
+      } else if (dict_.count(frame_id) == 0) {
+        lru_list_.push_front(node);
+        dict_[frame_id] = lru_list_.begin();
+      }
+    }
   }
 }
 
 void LRUKReplacer::SetEvictable(frame_id_t frame_id, bool set_evictable) {
   std::lock_guard<std::mutex> lock(latch_);
-  current_timestamp_ = std::chrono::system_clock::now().time_since_epoch().count();
   BUSTUB_ASSERT(frame_id >= 0 && static_cast<size_t>(frame_id) < replacer_size_, "frame id is invalid");
 
   if (node_store_.count(frame_id) == 0) {
-    node_store_[frame_id].fid_ = frame_id;
-    node_store_[frame_id].k_ = 0;
+    node_store_[frame_id] = LRUKNode(frame_id);
   }
+  LRUKNode *node = &node_store_.at(frame_id);
 
-  auto &node = node_store_.at(frame_id);
+  // if set_evictable is modified
+  if (set_evictable ^ node->is_evictable_) {
+    node->is_evictable_ = set_evictable;
 
-  if (set_evictable ^ node.is_evictable_) {
-    node.is_evictable_ = set_evictable;
     if (set_evictable) {
+      if (node->k_ == this->k_) {
+        k_list_.push_front(node);
+        auto cmp = [](LRUKNode *lhs, LRUKNode *rhs) { return lhs->history_.front() > rhs->history_.front(); };
+        // TODO(cyrus): 基本有序序列排序，可以优化到 O(n)
+        k_list_.sort(cmp);
+      } else {
+        lru_list_.push_front(node);
+        dict_[frame_id] = lru_list_.begin();
+        auto cmp = [](LRUKNode *lhs, LRUKNode *rhs) { return lhs->history_.back() > rhs->history_.back(); };
+        lru_list_.sort(cmp);
+      }
+
       ++curr_size_;
-      BUSTUB_ASSERT(curr_size_ <= replacer_size_, "");
+
     } else {
-      BUSTUB_ASSERT(curr_size_ > 0, "");
+      BUSTUB_ASSERT(dict_.count(frame_id), "This frame does not exist in dict");
+
+      if (node->k_ == this->k_) {
+        k_list_.erase(dict_[frame_id]);
+        dict_.erase(frame_id);
+      } else {
+        lru_list_.erase(dict_[frame_id]);
+        dict_.erase(frame_id);
+      }
+
       --curr_size_;
     }
   }
@@ -130,27 +123,36 @@ void LRUKReplacer::SetEvictable(frame_id_t frame_id, bool set_evictable) {
 
 void LRUKReplacer::Remove(frame_id_t frame_id) {
   std::lock_guard<std::mutex> lock(latch_);
-  current_timestamp_ = std::chrono::system_clock::now().time_since_epoch().count();
   BUSTUB_ASSERT(frame_id >= 0 && static_cast<size_t>(frame_id) < replacer_size_, "frame id is invalid");
 
   if (node_store_.count(frame_id) == 0) {
     return;
   }
+  LRUKNode *node = &node_store_.at(frame_id);
 
-  auto &node = node_store_.at(frame_id);
+  if (node->is_evictable_) {
+    BUSTUB_ASSERT(dict_.count(frame_id), "This frame does not exist in dict");
+    if (node->k_ == this->k_) {
+      k_list_.erase(dict_[frame_id]);
+      dict_.erase(frame_id);
+    } else {
+      lru_list_.erase(dict_[frame_id]);
+      dict_.erase(frame_id);
+    }
 
-  if (node.is_evictable_) {
-    node.history_.clear();
-    node.k_ = 0;
-    node.is_evictable_ = false;
-
-    BUSTUB_ASSERT(curr_size_ > 0, "");
     --curr_size_;
+    node->history_.clear();
+    node->k_ = 0;
+    node->is_evictable_ = false;
+
   } else {
-    throw ExecutionException("move a non-evictable frame");
+    throw ExecutionException("remove a non-evictable frame");
   }
 }
 
-auto LRUKReplacer::Size() -> size_t { return curr_size_; }
+auto LRUKReplacer::Size() -> size_t {
+  std::lock_guard<std::mutex> lock(latch_);
+  return curr_size_;
+}
 
 }  // namespace bustub
